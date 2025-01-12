@@ -365,5 +365,3 @@ DevSecOps videos - [Hackitect playground](https://www.youtube.com/channel/UCy0S_
 
 # License
 MIT license
-
-Yaar Naumenko (c) 2025
