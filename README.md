@@ -61,7 +61,7 @@ flowchart TB
     style Security fill:#ffebee
     style Container fill:#f3e5f5
     style Cloud fill:#e8f5e9
-    ```
+```
 
 The pipeline runs automatically on:
 - Pull requests that modify infrastructure files (`.tf`, `.tfvars`, `.hcl`, `Dockerfile`)
