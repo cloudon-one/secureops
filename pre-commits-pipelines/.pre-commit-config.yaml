@@ -1,0 +1,55 @@
+repos:
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.96.2
+    hooks:
+      - id: terraform_fmt
+        files: '(infra)/.*'
+        args:
+          - --args=-diff
+          - --args=-check
+      - id: terraform_validate
+        files: '(infra)/.*'
+      - id: terraform_tflint
+        files: '(infra)/.*'
+      - id: terraform_tfsec
+        files: '(infra)/.*'
+      - id: terraform_docs
+        files: '(infra)/.*'
+        exclude: 'infra/migrations/.*'
+        args:
+          - '--args=--lockfile=false'
+          - '--hook-config=--path-to-file=README.md'
+          - '--hook-config=--add-to-existing-file=true'
+          - '--hook-config=--create-file-if-not-exist=true'
+
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+    -   id: trailing-whitespace
+    -   id: end-of-file-fixer
+    -   id: check-yaml
+        args:
+          - --allow-multiple-documents
+    -   id: debug-statements
+    -   id: double-quote-string-fixer
+    -   id: name-tests-test
+    -   id: requirements-txt-fixer
+    -   id: detect-private-key
+    -   id: detect-aws-credentials
+        args:
+          - --allow-missing-credentials
+    -   id: pretty-format-json
+        args:
+          - --autofix
+
+  - repo: https://github.com/asottile/add-trailing-comma
+    rev: v3.1.0
+    hooks:
+    -   id: add-trailing-comma
+
+  - repo: https://github.com/hhatto/autopep8
+    rev: v2.3.1
+    hooks:
+    -   id: autopep8
+        args: ['--in-place']

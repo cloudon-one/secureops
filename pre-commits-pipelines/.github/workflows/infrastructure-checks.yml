@@ -1,0 +1,232 @@
+name: Infrastructure Checks
+
+on:
+  pull_request:
+    paths:
+      - '**.tf'
+      - '**.tfvars'
+      - '**.hcl'
+      - 'Dockerfile'
+      - '.github/workflows/**'
+      - '.pre-commit-config.yaml'
+  push:
+    branches: [ main, master ]
+    paths:
+      - '**.tf'
+      - '**.tfvars'
+      - '**.hcl'
+      - 'Dockerfile'
+      - '.github/workflows/**'
+      - '.pre-commit-config.yaml'
+
+# Cancel any in-progress job or run if a new one starts
+concurrency:
+  group: infra-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gitguard:
+    name: GitGuardian scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # We need the entire commit history to scan
+          fetch-depth: 0
+
+      - name: Run GitGuardian scan
+        uses: GitGuardian/ggshield/actions/secret@v1.34.0
+        env:
+          GITHUB_PUSH_BEFORE_SHA: ${{ github.event.before }}
+          GITHUB_PUSH_BASE_SHA: ${{ github.event.base }}
+          GITHUB_PULL_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
+
+  tfsec:
+    name: TFSec Scanner
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          soft_fail: true
+          version: latest
+          # Additional arguments without repeating `--format` multiple times
+          additional_args: --no-color --format json --run-statistics --out string
+
+  infracost-pull-request-checks:
+    name: Infracost Pull Request Checks
+    if: >
+      github.event_name == 'pull_request' &&
+      (github.event.action == 'opened' || github.event.action == 'synchronize')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+
+      - name: Generate Infracost cost estimate baseline
+        run: |
+          infracost breakdown --path=. \
+                              --format=json \
+                              --out-file=/tmp/infracost-base.json
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+
+      - name: Generate Infracost diff
+        run: |
+          infracost diff --path=. \
+                         --format=json \
+                         --compare-to=/tmp/infracost-base.json \
+                         --out-file=/tmp/infracost.json
+
+      - name: Post Infracost comment
+        run: |
+          infracost comment github --path=/tmp/infracost.json \
+                                   --repo=$GITHUB_REPOSITORY \
+                                   --github-token=${{ github.token }} \
+                                   --pull-request=${{ github.event.pull_request.number }} \
+                                   --behavior=update
+
+  infracost-default-branch-update:
+    name: Infracost Main Branch Update
+    if: github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'master')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Checkout branch
+        uses: actions/checkout@v4
+
+      - name: Run Infracost on default branch and update Infracost Cloud
+        run: |
+          infracost breakdown --path=. \
+                              --format=json \
+                              --out-file=infracost.json
+
+          infracost upload --path=infracost.json || echo "Always pass main/master runs even if there are policy failures"
+
+  infracost-pull-request-status-update:
+    name: Infracost PR Status Update
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Infracost PR Status Update
+        run: |
+          PR_STATUS="MERGED"
+          if [[ ${{ github.event.pull_request.merged }} == "false" ]]; then
+            PR_STATUS="CLOSED"
+          fi
+
+          echo "Updating status of ${{ github.event.pull_request.html_url }} to $PR_STATUS"
+
+          curl -i \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "X-API-Key: $INFRACOST_API_KEY" \
+            --data "{ \"query\": \"mutation { updatePullRequestStatus( url: \\\"${{ github.event.pull_request.html_url }}\\\", status: $PR_STATUS )}\" }" \
+            "https://dashboard.api.infracost.io/graphql"
+        env:
+          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+
+  infra-checks:
+    name: Infrastructure Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (for pre-commit, tflint, terraform, etc.)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: infra-checks:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run all checks in container
+        id: infra-validation
+        run: |
+          # We'll run all commands in a single container session to avoid repeated overhead.
+          docker run --rm -v ${{ github.workspace }}:/workspace -w /workspace infra-checks:latest /bin/sh -c '
+            set -e
+
+            # Configure git for pre-commit
+            git config --global --add safe.directory /workspace
+            git config --global user.email "action@github.com"
+            git config --global user.name "GitHub Action"
+
+            echo "=== Running pre-commit checks ==="
+            pre-commit run --all-files
+
+            echo "=== Collecting directories with .tf files ==="
+            dirs=$(find . -type f -name "*.tf" -exec dirname {} \; | sort -u)
+
+            echo "=== Running TFLint ==="
+            for dir in $dirs; do
+              echo "Running TFLint in $dir"
+              tflint --format=compact $dir
+            done
+
+            echo "=== Running Terraform init (backend disabled) ==="
+            for dir in $dirs; do
+              echo "Terraform init in $dir"
+              terraform init -backend=false -input=false $dir
+            done
+
+            echo "=== Running Terraform validate ==="
+            for dir in $dirs; do
+              echo "Terraform validate in $dir"
+              terraform validate $dir
+            done
+
+            echo "=== Checking for required_providers block ==="
+            missing_providers=0
+            for dir in $dirs; do
+              # If any .tf file is missing required_providers, raise an error.
+              if ! grep -qr "required_providers" "$dir"/*.tf; then
+                echo "::error::required_providers block missing in $dir"
+                missing_providers=1
+              fi
+            done
+
+            if [ $missing_providers -ne 0 ]; then
+              echo "Missing required_providers block in at least one directory."
+              exit 1
+            fi
+          '
+
+      - name: Final check
+        if: always()
+        run: |
+          if [ "${{ steps.infra-validation.outcome }}" == "failure" ]; then
+            echo "Infrastructure checks failed."
+            exit 1
+          fi
